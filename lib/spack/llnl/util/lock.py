@@ -95,10 +95,6 @@ class Lock(object):
         The lock is implemented as a spin lock using a nonblocking call
         to ``lockf()``.
 
-        On acquiring an exclusive lock, the lock writes this process's
-        pid and host to the lock file, in case the holding process needs
-        to be killed later.
-
         If the lock times out, it raises a ``LockError``. If the lock is
         successfully acquired, the total wait time and the number of attempts
         is returned.
@@ -284,11 +280,19 @@ class Lock(object):
             self._writes += 1
             return False
 
-    def release_read(self):
+    def release_read(self, release_fn=None):
         """Releases a read lock.
 
-        Returns True if the last recursive lock was released, False if
-        there are still outstanding locks.
+        Arguments:
+            release_fn (callable): function to call *before* the last recursive
+                lock (read or write) is released.
+
+        If the last recursive lock will be released, then this will call
+        release_fn and return its result (if provided), or return True
+        (if release_fn was not provided).
+
+        Otherwise, we are still nested inside some other lock, so do not
+        call the release_fn and, return False.
 
         Does limited correctness checking: if a read lock is released
         when none are held, this will raise an assertion error.
@@ -300,18 +304,30 @@ class Lock(object):
             self._debug(
                 'READ LOCK: {0.path}[{0._start}:{0._length}] [Released]'
                 .format(self))
+
+            result = True
+            if release_fn is not None:
+                result = release_fn()
+
             self._unlock()      # can raise LockError.
             self._reads -= 1
-            return True
+            return result
         else:
             self._reads -= 1
             return False
 
-    def release_write(self):
+    def release_write(self, release_fn=None):
         """Releases a write lock.
 
-        Returns True if the last recursive lock was released, False if
-        there are still outstanding locks.
+        Arguments:
+            release_fn (callable): function to call before the last recursive
+                write is released.
+
+        If the last recursive *write* lock will be released, then this
+        will call release_fn and return its result (if provided), or
+        return True (if release_fn was not provided). Otherwise, we are
+        still nested inside some other write lock, so do not call the
+        release_fn, and return False.
 
         Does limited correctness checking: if a read lock is released
         when none are held, this will raise an assertion error.
@@ -323,9 +339,16 @@ class Lock(object):
             self._debug(
                 'WRITE LOCK: {0.path}[{0._start}:{0._length}] [Released]'
                 .format(self))
+
+            # we need to call release_fn before releasing the lock
+            result = True
+            if release_fn is not None:
+                result = release_fn()
+
             self._unlock()      # can raise LockError.
             self._writes -= 1
-            return True
+            return result
+
         else:
             self._writes -= 1
             return False
@@ -383,13 +406,18 @@ class LockTransaction(object):
 
     def __exit__(self, type, value, traceback):
         suppress = False
-        if self._exit():
-            if self._as and hasattr(self._as, '__exit__'):
-                if self._as.__exit__(type, value, traceback):
-                    suppress = True
-            if self._release_fn:
-                if self._release_fn(type, value, traceback):
-                    suppress = True
+
+        def release_fn():
+            if self._release_fn is not None:
+                return self._release_fn(type, value, traceback)
+
+        if self._as and hasattr(self._as, '__exit__'):
+            if self._as.__exit__(type, value, traceback):
+                suppress = True
+
+        if self._exit(release_fn):
+            suppress = True
+
         return suppress
 
 
@@ -398,8 +426,8 @@ class ReadTransaction(LockTransaction):
     def _enter(self):
         return self._lock.acquire_read(self._timeout)
 
-    def _exit(self):
-        return self._lock.release_read()
+    def _exit(self, release_fn):
+        return self._lock.release_read(release_fn)
 
 
 class WriteTransaction(LockTransaction):
@@ -407,8 +435,8 @@ class WriteTransaction(LockTransaction):
     def _enter(self):
         return self._lock.acquire_write(self._timeout)
 
-    def _exit(self):
-        return self._lock.release_write()
+    def _exit(self, release_fn):
+        return self._lock.release_write(release_fn)
 
 
 class LockError(Exception):

@@ -117,6 +117,10 @@ class FileCache(object):
         moves the file into place on top of the old file atomically.
 
         """
+        # TODO: this nested context manager adds a lot of complexity and
+        # TODO: is pretty hard to reason about in llnl.util.lock. At some
+        # TODO: point we should just replace it with functions and simplify
+        # TODO: the locking code.
         class WriteContextManager(object):
 
             def __enter__(cm):  # noqa
